@@ -1090,21 +1090,20 @@ pub const Transport = struct {
     };
 
     pub const ReadError = std.posix.ReadError || error{EndOfStream} || BaseProtocolHeader.ParseError || std.mem.Allocator.Error;
-    pub const WriteError = std.posix.WriteError;
+    pub const WriteError = std.Io.File.Writer.Error;
 
     pub const Stdio = struct {
         transport: Transport,
         io: std.Io,
         reader: std.Io.Reader,
         read_from: std.Io.File,
-        write_to: std.fs.File,
+        write_to: std.Io.File,
 
         pub fn init(
             io: std.Io,
-            /// See `BaseProtocolHeader.parse`
             read_buffer: []u8,
             read_from: std.Io.File,
-            write_to: std.fs.File,
+            write_to: std.Io.File,
         ) Stdio {
             return .{
                 .transport = .{
@@ -1125,7 +1124,7 @@ pub const Transport = struct {
             var file_reader: std.Io.File.Reader = .{
                 .io = stdio.io,
                 .file = stdio.read_from,
-                .mode = .streaming_reading,
+                .mode = .streaming_simple,
                 .interface = stdio.reader,
             };
             defer stdio.reader = file_reader.interface;
@@ -1136,8 +1135,17 @@ pub const Transport = struct {
         }
 
         fn writeJsonMessage(transport: *Transport, json_message: []const u8) WriteError!void {
+
+            var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+            defer _ = debug_allocator.deinit();
+            const gpa = debug_allocator.allocator();
+
+            var threaded: std.Io.Threaded = .init(gpa, .{});
+            defer threaded.deinit();
+            const io = threaded.io();
+
             const stdio: *Stdio = @fieldParentPtr("transport", transport);
-            var file_writer: std.fs.File.Writer = .initStreaming(stdio.write_to, &.{});
+            var file_writer: std.Io.File.Writer = .initStreaming(stdio.write_to, io, &.{});
             return lsp.writeJsonMessage(&file_writer.interface, json_message) catch |err| switch (err) {
                 error.WriteFailed => return file_writer.err.?,
             };
@@ -1342,7 +1350,8 @@ pub fn writeRequest(
 }
 
 test writeRequest {
-    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    var buffer: std.ArrayListUnmanaged(u8) = .empty;
+    var aw: std.Io.Writer.Allocating = .fromArrayList(std.testing.allocator, &buffer);
     defer aw.deinit();
 
     try writeRequest(
@@ -1383,7 +1392,8 @@ pub fn writeNotification(
 }
 
 test writeNotification {
-    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    var buffer: std.ArrayListUnmanaged(u8) = .empty;
+    var aw: std.Io.Writer.Allocating = .fromArrayList(std.testing.allocator, &buffer);
     defer aw.deinit();
 
     try writeNotification(
@@ -1422,7 +1432,8 @@ pub fn writeResponse(
 }
 
 test writeResponse {
-    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    var buffer: std.ArrayListUnmanaged(u8) = .empty;
+    var aw: std.Io.Writer.Allocating = .fromArrayList(std.testing.allocator, &buffer);
     defer aw.deinit();
 
     try writeResponse(
@@ -1460,7 +1471,8 @@ pub fn writeErrorResponse(
 }
 
 test writeErrorResponse {
-    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    var buffer: std.ArrayListUnmanaged(u8) = .empty;
+    var aw: std.Io.Writer.Allocating = .fromArrayList(std.testing.allocator, &buffer);
     defer aw.deinit();
 
     try writeErrorResponse(
@@ -1486,7 +1498,7 @@ test writeErrorResponse {
 
 pub const minimum_logging_buffer_size: usize = 128;
 
-/// Creates a [window/logMessage](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#window_logMessage) notification.
+/// Creates a `window/logMessage` notification.
 /// Returns a slice that points into `buffer`.
 pub fn bufPrintLogMessage(
     /// A temporary buffer which will be used to store the json message.
@@ -1831,7 +1843,7 @@ pub fn Message(
             \\    \\}
             \\;
             \\
-            \\const Message = lsp.Message(RequestParams, NotificationParams, .{});
+            \\const Message = lsp.Message(.{ ... });
             \\const lsp_message = try Message.jsonParseFromSlice(allocator, json_message, .{});
             \\
         );
